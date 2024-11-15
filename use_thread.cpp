@@ -604,7 +604,9 @@ void f(std::stop_token stop_token, int value)
 {
     while (!stop_token.stop_requested())
     { // 检查是否已经收到停止请求
+        // std::cout << value++ << ' ';
         std::cout << value++ << ' ' << std::flush;
+        // 加不加 std::flush 好像没区别
         std::this_thread::sleep_for(200ms);
     }
     std::cout << std::endl;
