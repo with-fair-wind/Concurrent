@@ -193,9 +193,38 @@ void f2()
     ++n;
 }
 
+struct X
+{
+    X(const std::string &str) : object{str} {}
+
+    friend void swap(X &lhs, X &rhs);
+
+private:
+    std::string object;
+    std::mutex m;
+};
+
+void swap(X &lhs, X &rhs)
+{
+    if (&lhs == &rhs)
+        return;
+    std::lock_guard<std::mutex> lock1{lhs.m};
+    std::this_thread::sleep_for(5ms);
+    std::lock_guard<std::mutex> lock2{rhs.m};
+    swap(lhs.object, rhs.object);
+}
+
 int main()
 {
+#if 0
     std::jthread t1{f1};
     std::jthread t2{f2};
+#else
+    X a{"🤣"}, b{"😅"};
+    std::jthread t1{[&]
+                    { swap(a, b); }}; // 1
+    std::jthread t2{[&]
+                    { swap(b, a); }}; // 2
+#endif
 }
 #endif
