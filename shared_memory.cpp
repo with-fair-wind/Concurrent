@@ -193,9 +193,12 @@ void f2()
     ++n;
 }
 
+// 有的时候即使固定锁顺序，依旧会产生问题
 struct X
 {
     X(const std::string &str) : object{str} {}
+    void print() const { std::puts(object.c_str()); }
+    void address() const { std::cout << "object in add: " << static_cast<const void *>(object.data()) << std::endl; }
 
     friend void swap(X &lhs, X &rhs);
 
@@ -208,10 +211,19 @@ void swap(X &lhs, X &rhs)
 {
     if (&lhs == &rhs)
         return;
+#if 0
     std::lock_guard<std::mutex> lock1{lhs.m};
     std::this_thread::sleep_for(5ms);
-    std::lock_guard<std::mutex> lock2{rhs.m};
-    swap(lhs.object, rhs.object);
+    std::lock_guard<std::mutex> lock2{rhs.m}; 
+    // C++ 标准库有很多办法解决这个问题，可以使用 std::lock ，它能一次性锁住多个互斥量，并且没有死锁风险。
+#else
+    std::lock(lhs.m, rhs.m);
+    std::lock_guard<std::mutex> lock1{lhs.m, std::adopt_lock};
+    std::this_thread::sleep_for(5ms);
+    std::lock_guard<std::mutex> lock2{rhs.m, std::adopt_lock};
+    // 因为前面已经使用了 std::lock 上锁，所以后的 std::lock_guard 构造都额外传递了一个 std::adopt_lock 参数，让其选择到不上锁的构造函数。函数退出也能正常解锁
+#endif
+    std::swap(lhs.object, rhs.object);
 }
 
 int main()
@@ -220,11 +232,15 @@ int main()
     std::jthread t1{f1};
     std::jthread t2{f2};
 #else
+    // 考虑用户调用的时候将参数交换，就会产生死锁：
     X a{"🤣"}, b{"😅"};
+    a.address();
+    b.address();
     std::jthread t1{[&]
-                    { swap(a, b); }}; // 1
+                    { swap(a, b); a.address(); b.address(); }}; // 1
+
     std::jthread t2{[&]
-                    { swap(b, a); }}; // 2
+                    { swap(b, a); a.address(); b.address(); }}; // 2
 #endif
 }
 #endif
