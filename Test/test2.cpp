@@ -38,7 +38,7 @@ private:
 // 如果对象类型未定义移动操作，编译器将尝试使用拷贝构造和拷贝赋值。 const 左值引用可以接受右值
 // 因此，即使类型 T 不支持移动，std::move 仍然可以使用（会触发拷贝操作）
 
-// 有些容器（如std::vector）通过提供特化版本来提高swap的效率。例如，std::vector、std::string 的swap仅交换内部指针，而不实际移动元素
+// 有些容器（如std::vector）通过提供特化版本来提高swap的效率。例如，std::vector 的 swap 仅交换内部指针，而不实际移动元素
 
 void stringSwap()
 {
