@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <cmath>
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <future>
 #include <iostream>
 #include <iterator>
 #include <list>
@@ -23,7 +25,7 @@ using namespace std::chrono_literals;
 在多线程编程中，各个任务通常需要通过**同步设施**进行相互**协调和等待**，以确保数据的**一致性**和**正确性**
 */
 
-#define VERSION_3
+#define VERSION_6
 #ifdef VERSION_1
 /*
 等待事件及条件
@@ -97,11 +99,10 @@ void wait_for_arrival()
     cv.wait(lck, []
             { return arrived; }); // 等待 arrived 变为 true
     std::cout << "到达目的地，可以下车了！" << std::endl;
-#if 0
-    arrived = false;
+#if 1
     std::this_thread::sleep_for(5s);
-    std::cout << "reset arrived to satisfy condition\n";
-    arrived = true;
+    std::cout << "Reset arrived to allow other threads to continue waiting and blocking\n";
+    arrived = false;
 #endif
 }
 
@@ -113,10 +114,9 @@ void race_arrival()
             { return arrived; }); // 等待 arrived 变为 true
     std::cout << "race_arrival" << std::endl;
 #if 0
-    arrived = false;
     std::this_thread::sleep_for(5s);
-    std::cout << "reset arrived to satisfy condition\n";
-    arrived = true;
+    std::cout << "Reset arrived to allow other threads to continue waiting and blocking\n";
+    arrived = false;
 #endif
 }
 
@@ -171,6 +171,7 @@ public:
             std::this_thread::sleep_for(2s);
         }
         data_cond.notify_one();
+        // std::this_thread::sleep_for(10ms);
     }
     // 从队列中弹出元素（阻塞直到队列不为空）
     void pop(T &value)
@@ -221,6 +222,360 @@ int main()
 }
 
 #elif defined(VERSION_3)
-// 模拟
+// future
+/*
+1:用于处理线程中需要等待某个事件的情况，线程知道预期结果。等待的同时也可以执行其它的任务
+2:独占的 std::future 、共享的 std::shared_future 类似独占/共享智能指针
+3:std::future 只能与单个指定事件关联，而 std::shared_future 能关联多个事件
+4:它们都是模板，它们的模板类型参数，就是其关联的事件（函数）的返回类型
+5:当多个线程需要访问一个独立 future 对象时， 必须使用互斥量或类似同步机制进行保护
+6:??? 而多个线程访问同一共享状态，若每个线程都是通过其自身的 shared_future 对象副本进行访问，则是安全的
+*/
+
+// 创建异步任务获取返回值
+// 假设需要执行一个耗时任务并获取其返回值，但是并不急切的需要它。那么就可以启动新线程计算
+// 然而 std::thread 没提供直接从线程获取返回值的机制。所以可以使用 std::async 函数模板。
+/*
+1:使用 std::async 启动一个异步任务，会返回一个 std::future 对象，这个对象和任务关联，将持有最终计算出来的结果。
+2:当需要任务执行完的结果的时候，只需要调用 get() 成员函数，就会阻塞直到 future 为就绪为止（即任务执行完毕），返回执行结果。
+3:valid() 成员函数检查 future 当前是否关联共享状态，即是否当前关联任务。还未关联，或者任务已经执行完（调用了 get()、set()），都会返回 false
+*/
+#define Strategy
+#ifdef Init
+int task(int n)
+{
+    std::cout << "异步任务 ID: " << std::this_thread::get_id() << "\n";
+    return n * n;
+}
+
+int main()
+{
+    std::future<int> future = std::async(task, 10);
+    std::cout << "main: " << std::this_thread::get_id() << '\n';
+    std::cout << std::boolalpha << future.valid() << '\n'; // true
+    std::cout << future.get() << '\n';
+    std::cout << std::boolalpha << future.valid() << '\n'; // false
+}
+
+#elif defined(Params)
+// std::async支持所有可调用(Callable)对象，并且也是默认按值复制，必须使用 std::ref 才能传递引用。
+// 和 std::thread 一样，内部会将保有的参数副本转换为右值表达式进行传递，这是为了那些只支持移动的类型
+
+struct X
+{
+    int operator()(int n) const
+    {
+        return n * n;
+    }
+};
+struct Y
+{
+    int f(int n) const
+    {
+        return n * n;
+    }
+};
+void f(int &p) { std::cout << &p << '\n'; }
+
+int main()
+{
+    Y y;
+    int n = 0;
+    auto t1 = std::async(X{}, 10);
+    auto t2 = std::async(&Y::f, &y, 10);
+    auto t3 = std::async([] {});
+    auto t4 = std::async(f, std::ref(n)); //
+    std::cout << &n << '\n';
+}
+
+#elif defined(MoveOnly)
+struct move_only
+{
+    move_only() { std::puts("默认构造"); }
+    move_only(move_only &&) noexcept { std::puts("移动构造"); }
+    move_only &operator=(move_only &&) noexcept
+    {
+        std::puts("移动赋值");
+        return *this;
+    }
+    move_only(const move_only &) = delete;
+};
+
+move_only task(move_only x)
+{
+    std::cout << "异步任务 ID: " << std::this_thread::get_id() << '\n';
+    return x;
+}
+
+int main()
+{
+    move_only x;
+    std::future<move_only> future = std::async(task, std::move(x));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::cout << "main\n";
+    move_only result = future.get(); // 等待异步任务执行完毕
+}
+
+#elif defined(Strategy)
+/*
+1:std::launch::async 在不同线程上执行异步任务。
+2:std::launch::deferred 惰性求值，不创建线程，等待 future 对象调用 wait 或 get 成员函数的时候执行任务。
+*/
+/*
+std::async 函数模板有两个重载，不给出执行策略就是以：std::launch::async | std::launch::deferred 调用另一个重载版本
+此策略表示由实现选择到底是否创建线程执行异步任务。
+如果系统资源充足，并且异步任务的执行不会导致性能问题，那么系统可能会选择在新线程中执行任务。
+如果系统资源有限，或者延迟执行可以提高性能或节省资源，那么系统可能会选择延迟执行。
+而在MSVC中 只要不是 launch::deferred 策略，那么 MSVC STL 实现中都是必然在线程中执行任务。因为是线程池，所以执行新任务是否创建新线程，任务执行完毕线程是否立即销毁，不确定
+*/
+
+void f()
+{
+    std::cout << std::this_thread::get_id() << '\n';
+}
+
+void t1()
+{
+    std::this_thread::sleep_for(3s);
+    std::cout << "t1 end!\n";
+}
+
+void t2()
+{
+    std::cout << "wait fot t1 end!\n";
+}
+
+int main()
+{
+    std::cout << std::this_thread::get_id() << '\n';
+    auto f1 = std::async(std::launch::deferred, f);
+    f1.wait();                                                           // 在 wait() 或 get() 调用时执行，不创建线程
+    auto f2 = std::async(std::launch::async, f);                         // 创建线程执行异步任务
+    auto f3 = std::async(std::launch::deferred | std::launch::async, f); // 实现选择的执行方式
+    // 如果从 std::async 获得的 std::future 没有被移动或绑定到引用，那么在完整表达式结尾， std::future 的**析构函数将阻塞，直到到异步任务完成**。因为临时对象的生存期就在这一行，而对象生存期结束就会调用调用析构函数。
+    // 这并不能创建异步任务，它会阻塞，然后逐个执行
+    std::async(std::launch::async, t1); // 临时量的析构函数等待 t1()
+    std::async(std::launch::async, t2); // t1() 完成前不开始
+}
+// 被移动的 std::future 没有所有权，失去共享状态，不能调用 get、wait 成员函数。
+#endif
+#elif defined(VERSION_4)
+// future 与 std::packaged_task
+// 类模板 std::packaged_task 包装任何可调用(Callable)目标（函数、lambda 表达式、bind 表达式或其它函数对象），使得能异步调用它
+// 其返回值或所抛异常被存储于能通过 std::future 对象访问的共享状态中
+// 通常它会和 std::future 一起使用，不过也可以单独使用
+// std::packaged_task 只能移动，不能复制
+
+#if 0
+int main()
+{
+#if 0
+    std::packaged_task<double(int, int)> task([](int a, int b)
+                                              {
+        std::cout << "task ID: " << std::this_thread::get_id() << "\n"; 
+        return std::pow(a, b); });
+    std::future<double> future = task.get_future(); // 和 future 关联
+    task(10, 2);                                    // 此处执行任务
+    std::cout << future.get() << "\n";              // 不阻塞，此处获取返回值
+#else
+    // 在线程中执行异步任务，然后再获取返回值，可以这么做
+    std::packaged_task<double(int, int)> task([](int a, int b)
+                                              { return std::pow(a, b); });
+    std::future<double> future = task.get_future();
+    std::thread t{std::move(task), 10, 2}; // 任务在线程中执行
+    // todo.. 幻想还有许多耗时的代码
+    t.join();
+    std::cout << future.get() << '\n'; // 并不阻塞，获取任务返回值罢了
+#endif
+}
+#else
+// std::packaged_task 也可以在线程中传递，在需要的时候获取返回值，而非像上面那样将它自己作为可调用对象
+template <typename R, typename... Ts, typename... Args>
+    requires std::invocable<std::packaged_task<R(Ts...)> &, Args...>
+void async_task(std::packaged_task<R(Ts...)> &task, Args &&...args)
+{
+    // todo..
+    task(std::forward<Args>(args)...);
+    std::this_thread::sleep_for(2s);
+}
+
+int main()
+{
+    std::packaged_task<int(int, int)> task([](int a, int b)
+                                           { std::this_thread::sleep_for(2s);
+                                            return a + b; });
+    int value = 50;
+    std::future<int> future = task.get_future();
+    // 创建一个线程来执行异步任务
+    // 套了一个 lambda，这是因为函数模板不是函数，它并非具体类型，没办法直接被那样传递使用，只能包一层
+    std::thread t{[&]
+                  { async_task(task, value, value); }};
+    std::cout << future.get() << '\n'; // 会阻塞直至任务执行完毕
+    std::cout << "end!" << std::endl;
+    t.join();
+}
+#endif
+#elif defined(VERSION_5)
+// 改写sum : std::package_task + std::future 的形式
+template <typename ForwardIt>
+auto sum(ForwardIt first, ForwardIt second)
+// typename std::iterator_traits<ForwardIt>::value_type sum(ForwardIt first, ForwardIt second)  // C++11
+{
+    using value_type = std::iter_value_t<ForwardIt>; // C++20
+    // using value_type = typename std::iterator_traits<ForwardIt>::value_type // C++11
+    std::size_t num_threads = std::thread::hardware_concurrency();
+    std::ptrdiff_t distance = std::distance(first, second);
+
+    if (distance > 1024000)
+    {
+        std::size_t chunk_size = distance / num_threads;
+        std::size_t remainder = distance % num_threads;
+
+        std::vector<std::future<value_type>> futures{num_threads};
+        std::vector<std::packaged_task<value_type()>> tasks;
+
+        std::vector<std::thread> threads;
+
+        auto start = first;
+        for (std::size_t i = 0; i < num_threads; ++i)
+        {
+            auto end = std::next(start, chunk_size + (i < remainder ? 1 : 0));
+            tasks.emplace_back([start, end]
+                               { return std::accumulate(start, end, value_type{}); });
+            futures[i] = tasks[i].get_future();
+            threads.emplace_back(std::move(tasks[i]));
+            start = end;
+        }
+
+        for (auto &thread : threads)
+            thread.join();
+
+        value_type total_sum{};
+        for (auto &future : futures)
+            total_sum += future.get();
+        return total_sum;
+    }
+    return std::accumulate(first, second, value_type{});
+}
+
+int main()
+{
+    unsigned int n = std::thread::hardware_concurrency();
+    std::cout << "支持 " << n << " 个并发线程。\n";
+
+    std::vector<std::string> vecs{"1", "2", "3", "4"};
+    auto result = sum(vecs.begin(), vecs.end());
+    std::cout << result << '\n';
+
+    vecs.clear();
+    for (std::size_t i = 0; i <= 102u; ++i)
+        vecs.push_back(std::to_string(i));
+
+    result = sum(vecs.begin(), vecs.end());
+    // std::cout << result << '\n';
+}
+
+#elif defined(VERSION_6)
+// promise
+// 类模板 std::promise 用于存储一个值或一个异常，之后通过 std::promise 对象所创建的 std::future 对象异步获得
+// 只能移动不可复制，多用作函数形参
+
+#define ReSet
+#ifdef Normal
+void calculate_square(std::promise<int> promiseObj, int num)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    // 计算平方并设置值到 promise 中
+    promiseObj.set_value(num * num);
+
+    std::this_thread::sleep_for(2s);
+}
+
+int main()
+{
+    std::promise<int> promise;
+    std::future<int> future = promise.get_future();
+
+    std::thread t{calculate_square, std::move(promise), 5};
+
+    /*
+    *** 区别于 std::packaged_task 阻塞至 std::packaged_task 任务执行完，promise 关联的 future 只阻塞到set_value/set_exception
+    */
+
+    std::cout << future.get() << std::endl; // 阻塞直至结果可用
+    std::cout << "end!" << std::endl;
+    t.join();
+}
+#elif defined(Exception)
+// set_exception() 接受一个 std::exception_ptr 类型的参数，这个参数通常通过 std::current_exception() 获取，用于指示当前线程中抛出的异常
+// std::future 对象通过 get() 函数获取这个异常，如果 promise 所在的函数有异常被抛出，则 std::future 对象会重新抛出这个异常，从而允许主线程捕获并处理它
+// 编译器不知道为啥不行
+// https://godbolt.org/z/xs3x178vE
+void throw_function(std::promise<int> prom)
+{
+    try
+    {
+        throw std::runtime_error("一个异常");
+    }
+    catch (...)
+    {
+        prom.set_exception(std::current_exception());
+    }
+}
+
+int main()
+{
+    std::promise<int> prom;
+    std::future<int> fut = prom.get_future();
+
+    std::jthread t(throw_function, std::move(prom));
+
+    try
+    {
+        std::cout << "等待线程执行，抛出异常并设置\n";
+        throw fut.get();
+    }
+    catch (std::exception &e)
+    {
+        std::cerr << "来自线程的异常: " << e.what() << '\n';
+    }
+}
+#elif defined(ReSet)
+// 共享状态的 promise 已经存储值或者异常，再次调用 set_value（set_exception） 会抛出 std::future_error 异常，将错误码设置为 promise_already_satisfied
+void throw_function(std::promise<int> prom)
+{
+    prom.set_value(100);
+    try
+    {
+        throw std::runtime_error("一个异常");
+    }
+    catch (...)
+    {
+        try
+        {
+            // 共享状态的 promise 已存储值，调用 set_exception 产生异常
+            prom.set_exception(std::current_exception());
+            // prom.set_value(50);
+        }
+        catch (std::exception &e)
+        {
+            std::cerr << "来自 set_exception 的异常: " << e.what() << '\n';
+        }
+    }
+}
+
+int main()
+{
+    std::promise<int> prom;
+    std::future<int> fut = prom.get_future();
+
+    std::thread t(throw_function, std::move(prom));
+
+    std::cout << "等待线程执行，抛出异常并设置\n";
+    std::cout << "值：" << fut.get() << '\n'; // 100
+
+    t.join();
+}
+#endif
 
 #endif
