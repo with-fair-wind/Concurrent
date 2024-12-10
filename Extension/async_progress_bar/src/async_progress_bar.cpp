@@ -1,6 +1,6 @@
 #include "async_progress_bar.h"
 
-async_progress_bar::async_progress_bar(QWidget *parent) : QMainWindow{parent},
+async_progress_bar::async_progress_bar(QWidget *parent) : QWidget{parent},
                                                           progress_bar{new QProgressBar(this)},
                                                           button{new QPushButton("start", this)},
                                                           button2{new QPushButton("测试", this)}
@@ -24,7 +24,7 @@ async_progress_bar::async_progress_bar(QWidget *parent) : QMainWindow{parent},
     layout->addWidget(button, 0, Qt::AlignHCenter);
     layout->addWidget(button2, 0, Qt::AlignHCenter);
     // 设置窗口布局为垂直布局管理器
-    centralWidget()->setLayout(layout);
+    this->setLayout(layout);
 
     setWindowIcon(QIcon(":/resource/images/safe.png"));
 
@@ -35,6 +35,7 @@ async_progress_bar::async_progress_bar(QWidget *parent) : QMainWindow{parent},
 
 void async_progress_bar::task()
 {
+    // QMetaObject::invokeMethod 的 lambda 是在主线程运行的
     future = std::async(std::launch::async, [this]
                         {
             QMetaObject::invokeMethod(this, [this] {

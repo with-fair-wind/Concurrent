@@ -10,10 +10,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Qt5 COMPONENTS Widgets REQUIRED) # Qt COMPONENTS
 
 # 查找源文件
-file(GLOB UI_FILES ${CMAKE_SOURCE_DIR}/ui/*.ui) # 确保路径正确，ui 文件夹下的所有 .ui 文件
-file(GLOB SRC_FILES ${CMAKE_SOURCE_DIR}/src/*.cpp) # src 文件夹下的所有 .cpp 文件
-file(GLOB HEADER_FILES ${CMAKE_SOURCE_DIR}/inc/*.h) # inc 文件夹下的所有 .h 文件
-file(GLOB RESOURCE_FILES ${CMAKE_SOURCE_DIR}/qrc/*.qrc) # inc 文件夹下的所有 .h 文件
+file(GLOB UI_FILES ${CMAKE_SOURCE_DIR}/ui/*.ui)
+file(GLOB SRC_FILES ${CMAKE_SOURCE_DIR}/src/*.cpp)
+file(GLOB HEADER_FILES ${CMAKE_SOURCE_DIR}/inc/*.h)
+file(GLOB RESOURCE_FILES ${CMAKE_SOURCE_DIR}/qrc/*.qrc)
 
 list(APPEND CMAKE_AUTOUIC_SEARCH_PATHS "ui")
 list(APPEND CMAKE_AUTORCC_SEARCH_PATHS "qrc")

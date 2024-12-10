@@ -2,16 +2,20 @@
 #include <cmath>
 #include <condition_variable>
 #include <exception>
+#include <format>
 #include <functional>
 #include <future>
 #include <iostream>
 #include <iterator>
+#include <latch>
 #include <list>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
 #include <queue>
+#include <random>
+#include <semaphore>
 #include <shared_mutex>
 #include <string>
 #include <syncstream>
@@ -25,7 +29,7 @@ using namespace std::chrono_literals;
 在多线程编程中，各个任务通常需要通过**同步设施**进行相互**协调和等待**，以确保数据的**一致性**和**正确性**
 */
 
-#define VERSION_11
+#define VERSION_14
 #ifdef VERSION_1
 /*
 等待事件及条件
@@ -771,6 +775,7 @@ int main()
     std::cout << res.count() << std::endl;
     // timeEndPeriod(1);
 }
+
 #elif defined(VERSION_11)
 std::condition_variable cv;
 bool done{};
@@ -808,4 +813,152 @@ int main()
     cv.notify_one();
     t.join();
 }
+
+#elif defined(VERSION_12)
+// C++20 引入了信号量 信号量源自操作系统，是一个古老而广泛应用的同步设施，在各种编程语言中都有自己的抽象实现
+// 信号量是一个非常轻量简单的同步设施，它维护一个计数，这个计数不能小于 0
+/*
+信号量提供两种基本操作：释放（增加计数）和等待（减少计数）。
+如果当前信号量的计数值为 0，那么执行“等待”操作的线程将会一直阻塞，直到计数大于 0，也就是其它线程执行了“释放”操作。
+
+C++ 提供了两个信号量类型：std::counting_semaphore 与 std::binary_semaphore，定义在 <semaphore> 中
+binary_semaphore 只是 counting_semaphore 的一个特化别名 : using binary_semaphore = counting_semaphore<1>;
+
+acquire 函数就是“等待”（原子地减少计数），release 函数就是"释放"（原子地增加计数）
+*/
+
+/*
+1:counting_semaphore 是一个轻量同步原语，能控制对共享资源的访问。
+2:不同于 std::mutex，counting_semaphore 允许同一资源进行多个并发的访问，至少允许 LeastMaxValue 个同时访问者
+3:binary_semaphore 是 std::counting_semaphore 的特化的别名，其 LeastMaxValue 为 1
+4:LeastMaxValue 是我们设置的非类型模板参数，意思是信号量维护的计数最大值
+5:如其名所示，LeastMaxValue 是最小 的最大值，而非实际 最大值。静态成员函数 max()可能产生大于 LeastMaxValue 的值。
+*/
+
+// 全局二元信号量对象
+// 设置对象初始计数为 0
+#if 0
+std::binary_semaphore smph_signal_main_to_thread{0};
+std::binary_semaphore smph_signal_thread_to_main{0};
+
+void thread_proc()
+{
+    smph_signal_main_to_thread.acquire();
+    std::cout << "[线程] 获得信号" << std::endl;
+
+    std::this_thread::sleep_for(3s);
+
+    std::cout << "[线程] 发送信号\n";
+    smph_signal_thread_to_main.release();
+}
+
+int main()
+{
+    std::jthread thr_worker{thread_proc};
+
+    std::cout << "[主] 发送信号\n";
+    smph_signal_main_to_thread.release();
+
+    smph_signal_thread_to_main.acquire();
+    std::cout << "[主] 获得信号\n";
+}
+#else
+// 定义一个信号量，最大并发数为 3
+std::counting_semaphore<3> semaphore{3};
+
+void handle_request(int request_id)
+{
+    // 请求到达，尝试获取信号量
+    std::cout << "进入 handle_request 尝试获取信号量\n";
+
+    semaphore.acquire();
+
+    std::cout << "成功获取信号量\n";
+
+    // 此处延时三秒可以方便测试，会看到先输出 3 个“成功获取信号量”，因为只有三个线程能成功调用 acquire，剩余的会被阻塞
+    std::this_thread::sleep_for(3s);
+
+    // 模拟处理时间
+    std::random_device rd;
+    std::mt19937 gen{rd()};
+    std::uniform_int_distribution<> dis(1, 5);
+    int processing_time = dis(gen);
+    std::this_thread::sleep_for(std::chrono::seconds(processing_time));
+
+    std::cout << std::format("请求 {} 已被处理\n", request_id);
+
+    semaphore.release();
+}
+
+int main()
+{
+    // 模拟 10 个并发请求
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < 10; ++i)
+    {
+        threads.emplace_back(handle_request, i);
+    }
+}
+#endif
+
+#elif defined(VERSION_13)
+// 自己的理解
+/*
+std::binary_semaphore 可以近似当作互斥量使用
+std::condition_variable 条件变量因为需要结合 unique_lock 即使被 notify_all 也只有一个线程可以抢到锁
+std::counting_semaphore 信号量允许同一资源进行多个并发的访问，此时若涉及到对共享资源的操作，还是需要进行互斥量保护
+*/
+
+#elif defined(VERSION_14)
+// 闩 (latch) 与屏障 (barrier) 是线程协调机制
+// 允许任何数量的线程阻塞直至期待数量的线程到达
+// 闩不能重复使用，而屏障则可以, 它们定义在标头 <latch> 与 <barrier>
+// std::latch “闩” : 单次使用的线程屏障
+/*
+latch 类维护着一个 std::ptrdiff_t 类型的计数，且只能减少计数，无法增加计数
+在创建对象的时候初始化计数器的值。线程可以阻塞，直到 latch 对象的计数减少到零
+由于无法增加计数，这使得 latch 成为一种单次使用的屏障
+*/
+
+#if 0
+std::latch work_start{3};
+
+void work()
+{
+    std::cout << "等待其它线程执行\n";
+    work_start.wait(); // 等待计数为 0
+    std::cout << "任务开始执行\n";
+}
+
+int main()
+{
+    std::jthread thread{work};
+    std::this_thread::sleep_for(3s);
+    std::cout << "休眠结束\n";
+    work_start.count_down();  // 默认值是 1 减少计数 1
+    work_start.count_down(2); // 传递参数 2 减少计数 2
+}
+#else
+// 由于 latch 的计数不可增加，它的使用通常非常简单，可以用来划分任务执行的工作区间
+std::latch latch{10};
+// arrive_and_wait 函数等价于：count_down(n); wait(); 也就是减少计数 + 等待
+// 必须等待所有线程执行到 latch.arrive_and_wait(); 将 latch 的计数减少至 0 才能继续往下执行。
+void f(int id)
+{
+    // todo.. 脑补任务
+    std::this_thread::sleep_for(1s);
+    std::cout << std::format("线程 {} 执行完任务，开始等待其它线程执行到此处\n", id);
+    latch.arrive_and_wait();
+    std::cout << std::format("线程 {} 彻底退出函数\n", id);
+}
+
+int main()
+{
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < 10; ++i)
+    {
+        threads.emplace_back(f, i);
+    }
+}
+#endif
 #endif
