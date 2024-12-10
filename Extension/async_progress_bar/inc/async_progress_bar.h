@@ -12,7 +12,9 @@
 #include <thread>
 using namespace std::chrono_literals;
 
-class async_progress_bar : public QMainWindow
+// 在 Qt 中，GUI 控件通常只能在创建它们的线程中进行操作，因为它们是线程不安全的
+// 可以使用 QMetaObject::invokeMethod 来跨线程调用主线程上的控件方法, 从而在其他线程中安全地更新 UI 控件
+class async_progress_bar : public QWidget
 {
     Q_OBJECT
 
