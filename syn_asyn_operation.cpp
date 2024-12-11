@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <barrier>
 #include <cmath>
 #include <condition_variable>
 #include <exception>
@@ -13,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <omp.h>
 #include <queue>
 #include <random>
 #include <semaphore>
@@ -29,7 +31,7 @@ using namespace std::chrono_literals;
 在多线程编程中，各个任务通常需要通过**同步设施**进行相互**协调和等待**，以确保数据的**一致性**和**正确性**
 */
 
-#define VERSION_14
+#define VERSION_17
 #ifdef VERSION_1
 /*
 等待事件及条件
@@ -961,4 +963,185 @@ int main()
     }
 }
 #endif
+#elif defined(VERSION_15)
+// std::barrier 和 std::latch 最大的不同是，前者可以在阶段完成之后将计数重置为构造时传递的值，而后者只能减少计数
+#if 0
+std::barrier barrier{10,
+                     [n = 1]() mutable noexcept
+                     { std::cout << "\t第" << n++ << "轮结束\n"; }};
+// 一个过程完成后，重置计数，然后调用传入的 lambda 表达式
+
+void f(int start, int end)
+{
+    for (int i = start; i <= end; ++i)
+    {
+        std::osyncstream{std::cout} << i << ' ';
+        barrier.arrive_and_wait(); // 减少计数并等待 解除阻塞时就重置计数并调用函数对象
+
+        std::this_thread::sleep_for(300ms);
+    }
+}
+// arrive_and_wait 等价于 wait(arrive());原子地将期待计数减少 1，然后在当前阶段的同步点阻塞直至运行当前阶段的阶段完成步骤
+// arrive_and_wait() 会在期待计数减少至 0 时调用我们构造 barrier 对象时传入的 lambda 表达式，并解除所有在阶段同步点上阻塞的线程。之后重置期待计数为构造中指定的值。屏障的一个阶段就完成了。
+//  std::osyncstream C++20 确保输出流在多线程环境中同步，避免除数据竞争，而且将不以任何方式穿插或截断
+
+int main()
+{
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < 10; ++i)
+    {
+        threads.emplace_back(f, i * 10 + 1, (i + 1) * 10);
+    }
+}
+#else
+//  arrive_and_drop 可以改变重置的计数值：它将所有后继阶段的初始期待计数减少一，当前阶段的期待计数也减少一, 用来控制在需要的时候，让一些线程退出同步
+std::atomic_int active_threads{4};
+std::barrier barrier{4,
+                     [n = 1]() mutable noexcept
+                     {
+                         std::cout << "\t第" << n++ << "轮结束，活跃线程数: " << active_threads << '\n';
+                     }};
+// lambda 表达式必须声明为 noexcept ，因为 std::barrier 要求其函数对象类型必须是不抛出异常的
+// 即要求 std::is_nothrow_invocable_v<_Completion_function&> 为 true
+
+void f(int thread_id)
+{
+    for (int i = 1; i <= 5; ++i)
+    {
+        std::osyncstream{std::cout} << "线程 " << thread_id << " 输出: " << i << '\n';
+        if (i == 3 && thread_id == 2)
+        { // 假设线程 ID 为 2 的线程在完成第三轮同步后退出
+            std::osyncstream{std::cout} << "线程 " << thread_id << " 完成并退出\n";
+            --active_threads;          // 减少活跃线程数
+            barrier.arrive_and_drop(); // 减少当前计数 1，并减少重置计数 1
+            return;
+        }
+        barrier.arrive_and_wait(); // 减少计数并等待，解除阻塞时重置计数并调用函数对象
+    }
+}
+
+int main()
+{
+    std::vector<std::jthread> threads;
+    for (int i = 1; i <= 4; ++i)
+    {
+        threads.emplace_back(f, i);
+    }
+}
+#endif
+#elif defined(VERSION_16)
+// [OpenMP](https://learn.microsoft.com/zh-cn/cpp/parallel/openmp/2-directives?view=msvc-170#263-barrier-directive)
+void f(int start, int end, int thread_id)
+{
+    for (int i = start; i <= end; ++i)
+    {
+        // 输出当前线程的数字
+        std::cout << std::to_string(i) + " ";
+
+        // 等待所有线程同步到达 barrier 也就是等待都输出完数字
+#pragma omp barrier
+
+// 每个线程输出完一句后，主线程输出轮次信息
+#pragma omp master
+        {
+            static int round_number = 1;
+            std::cout << "\t第" << round_number++ << "轮结束\n";
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+
+        // 再次同步 等待所有线程（包括主线程）到达此处、避免其它线程继续执行打断主线程的输出
+#pragma omp barrier
+    }
+}
+
+int main()
+{
+    constexpr int num_threads = 10;
+    omp_set_num_threads(num_threads);
+
+#pragma omp parallel
+    {
+        const int thread_id = omp_get_thread_num();
+        f(thread_id * 10 + 1, (thread_id + 1) * 10, thread_id);
+    }
+}
+// https://godbolt.org/z/fabqhbx3P
+
+#elif defined(VERSION_17)
+// 启动线程时可能存在其它数据成员还未初始化，导致未定义行为
+/*
+初始化的实际顺序如下：
+1: 果构造函数是最终派生类的，那么按基类声明的深度优先、从左到右的遍历中的出现顺序（从左到右指的>是基说明符列表中所呈现的顺序），初始化各个虚基类。
+2: 然后，以在此类的基类说明符列表中出现的从左到右顺序，初始化各个直接基类。
+3: 然后，以类定义中的声明顺序，初始化各个非静态成员。
+4: 最后，执行构造函数体。
+*/
+struct X
+{
+    X()
+    {
+        // 假设 X 的初始化没那么快
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::puts("X");
+        v.resize(10, 6);
+    }
+    std::vector<int> v;
+};
+
+#define Type1
+struct Test
+{
+
+#ifdef Type1
+#define Type1_2
+#ifdef Type1_1
+    Test() : t{&Test::f, this} // 线程已经开始执行
+    {
+    }
+#elif defined(Type1_2)
+    Test()
+    {
+        t = std::thread{&Test::f, this};
+    }
+#endif
+#elif defined(Type2)
+    Test() {}
+    void start() { t = std::thread{&Test::f, this}; }
+#endif
+
+    ~Test()
+    {
+        if (t.joinable())
+            t.join();
+    }
+    void f() const
+    { // 如果在函数执行的线程 f 中使用 x 则会存在问题。使用了未初始化的数据成员 ub
+        std::cout << "f\n";
+        std::cout << x.v[5] << std::endl;
+    }
+
+#ifdef Type1
+#ifdef Type1_1
+    X x;
+    std::thread t;
+#elif defined(Type1_2)
+    std::thread t;
+    X x;
+#endif
+#elif defined(Type2)
+    std::thread t; // 声明顺序决定了初始化顺序，优先初始化 t
+    X x;
+#endif
+};
+
+int main()
+{
+#ifdef Type1
+    Test t;
+#elif defined(Type2)
+    Test t;
+    t.start(); // 此方式不用管初始化顺序，因为此时初始化肯定已经全部完成了
+#endif
+}
+
 #endif
